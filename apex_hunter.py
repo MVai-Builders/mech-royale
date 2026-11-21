@@ -1,16 +1,14 @@
-"""MVai Apex Hunter Bot v6 - Builders Buildathon Mech Royale
+"""MVai Apex Predator v7 - Builders Buildathon Mech Royale
 =============================================================
-Strategy: Survival-first tactical kiter & apex predator
-- Placement-focused survival: avoids early multi-bot crossfires
-- #1 Projectile dodging: perpendicular evasion from incoming fire
-- Sound-based threat awareness: faces and detects threats from rear
-- True supply drop control: captures landed uncontested drops (3 cubes + full HP)
-- Early-game NPC farming: rapid cube acquisition (+4% HP/DMG per cube)
-- Dynamic circle-strafing with damage-reactive direction flipping
-- Predictive 2-pass lead aim for 252 m/s projectile ballistics
-- Smart weapon management: gun ammo/reload tracking & secondary burst
-- Low HP tactical retreat to zone interior
-- Anti-stuck curb jumping (clears 1.2m terrain steps)
+Tactical Master Engine:
+1. Anti-Rear Damage Kiting: Torso remains locked onto threat; backpedals with front armor facing enemy (avoids 1.5x rear crit damage).
+2. Aggressive 1v1 Elimination: Targets and eliminates early-game house bots to snowball kills & power cubes.
+3. Active Secondary Weapon Scavenging: Prioritizes Laser > Lightning > Mortar within 50m when slot 1 is open.
+4. Supply Drop Dominance: Routes to drops early for the game-changing 100% full HP repair + 3 cubes.
+5. Reactive Projectile Dodging: Perpendicular burst evasion against incoming fire.
+6. Power Cube & NPC Harvesting: Early cube accumulation (+4% HP & +4% DMG per cube).
+7. Sweet-Spot Zone Perimeter: Orbits at 65% zone radius to avoid the central 15-bot crossfire.
+8. Anti-Stuck & Curb Clearance: Automatic 1.2m curb leaping and obstacle evasion.
 """
 
 import math
@@ -48,7 +46,7 @@ class ApexHunter:
         self.strafe_dir = 1
         self.last_hp = 1000.0
         self.match_tick = 0
-        self.ticks_since_damage = 999
+        self.kills = 0
 
     def act(self, obs: mf.Observation) -> mf.Action:
         self.match_tick += 1
@@ -67,17 +65,15 @@ class ApexHunter:
 
         action: mf.Action = {"tick": current_tick}
 
-        # ─── 0. Event Handling & Threat Tracking ───────────────────
+        # ─── 0. Damage Reaction & Strafe Modulation ─────────────────
         hp_lost = self.last_hp - hp
-        if hp_lost > 1.0:
+        if hp_lost > 2.0:
+            # Taking fire: reverse strafe direction to break enemy predictive lead
             self.strafe_dir *= -1
-            self.ticks_since_damage = 0
-        else:
-            self.ticks_since_damage += 1
         self.last_hp = hp
         hp_ratio = hp / max(1.0, max_hp)
 
-        # ─── 1. Upgrade Selection (Armor > Sensor > HP/Repair > Speed > DPS) ─
+        # ─── 1. Upgrades Priority (Defense & Sustain > Speed > DPS) ─
         if obs.get("offer"):
             choices = obs["offer"].get("choices", [])
             priority = {
@@ -99,13 +95,14 @@ class ApexHunter:
         all_pickups = obs.get("pickups", [])
         near = [p for p in all_pickups if dist2d(p["pos"], pos) <= self.reach]
         has_secondary = len(weapons) > 1 and weapons[1] is not None
+
         if not has_secondary and near:
             pref = {"laser": 4, "lightning": 3, "mortar": 2, "gun": 1}
             best_pickup = max(near, key=lambda p: pref.get(p.get("kind", ""), 0))
             if pref.get(best_pickup.get("kind", ""), 0) > 0:
                 action["take"] = best_pickup["id"]
 
-        # ─── 3. Zone Navigation Vectors ────────────────────────────
+        # ─── 3. Zone Navigation Geometry ───────────────────────────
         zone = obs.get("zone", {})
         zc = zone.get("next_center") or zone.get("center", [0.0, 0.0])
         zr = zone.get("next_radius") or zone.get("radius", 300.0)
@@ -116,15 +113,16 @@ class ApexHunter:
         dist_to_curr = dist2d(pos, curr_center)
         to_zone_x, to_zone_y = norm2d(zc[0] - px, zc[1] - py)
 
-        outside_curr = dist_to_curr > curr_radius
-        outside_next = dist_to_next > zr
+        outside_curr = dist_to_curr > (curr_radius * 0.96)
+        outside_next = dist_to_next > (zr * 0.95)
 
-        # ─── 4. Entities & Perceptions ─────────────────────────────
+        # ─── 4. Entities & Perception ──────────────────────────────
         all_mechs = obs.get("mechs", [])
         enemy_mechs = [m for m in all_mechs if m.get("kind") == "mech"]
         for e in enemy_mechs:
             e["_dist"] = dist2d(e["pos"], pos)
-        enemy_mechs.sort(key=lambda m: m["_dist"])
+        # Prioritize closest enemy, or lowest HP if within 35m
+        enemy_mechs.sort(key=lambda m: (m.get("hp", 1000.0) if m["_dist"] < 35.0 else m["_dist"] * 50.0))
 
         npcs = [m for m in all_mechs if m.get("kind") == "npc"]
         for n in npcs:
@@ -134,9 +132,10 @@ class ApexHunter:
         projectiles = obs.get("projectiles", [])
         sounds = obs.get("sounds", [])
         drops = obs.get("drops", [])
+        cubes_on_ground = obs.get("cubes", [])
         crates = obs.get("crates", [])
 
-        # ─── 5. Incoming Projectile Dodging (#1 Survival Factor) ───
+        # ─── 5. Reactive Projectile Dodging ────────────────────────
         dodge_x, dodge_y = 0.0, 0.0
         dodge_urgency = 0.0
         for proj in projectiles:
@@ -152,107 +151,127 @@ class ApexHunter:
             t_impact = pdist / pspeed
 
             if 0.0 < t_impact < 0.65:
-                # Predicted position of bullet when it reaches our distance
                 pred_bx = pp[0] + pv[0] * t_impact
                 pred_by = pp[1] + pv[1] * t_impact
                 miss_d = dist2d([pred_bx, pred_by], pos)
 
-                if miss_d < 8.0:
-                    # Move perpendicular to bullet trajectory
+                if miss_d < 9.0:
                     b_dir_x, b_dir_y = norm2d(pv[0], pv[1])
                     perp_x, perp_y = rotate90(b_dir_x, b_dir_y, self.strafe_dir)
-                    urgency = (1.0 - t_impact / 0.65) * (1.0 - miss_d / 8.0)
+                    urgency = (1.0 - t_impact / 0.65) * (1.0 - miss_d / 9.0)
                     dodge_x += perp_x * urgency
                     dodge_y += perp_y * urgency
                     dodge_urgency = max(dodge_urgency, urgency)
 
-        # ─── 6. Tactical Decision & Movement ───────────────────────
+        # ─── 6. Tactical Strategy & Decision Making ────────────────
         move_x, move_y = to_zone_x, to_zone_y
         aim_yaw = math.atan2(to_zone_y, to_zone_x)
         aim_pitch = 0.0
         should_fire = False
         combat_target = None
+        in_direct_combat = False
 
-        # Supply drop evaluation (from obs["drops"])
+        # Evaluate supply drops (100% full health repair + 3 cubes)
         best_drop = None
         for d in drops:
             ddist = dist2d(d["pos"], pos)
-            # Landed, uncontested or held by us, reasonably close
-            if d.get("lands_in", 0) <= 1.0 and (d.get("holder") is None or d.get("holder") == me.get("id")):
-                if ddist < 75.0:
+            lands_in = d.get("lands_in", 999.0)
+            holder = d.get("holder")
+            # If drop is already landed or landing within 12 seconds
+            if lands_in <= 12.0 and (holder is None or holder == me.get("id")):
+                if ddist < 90.0:
                     best_drop = d
                     break
 
-        # Engagement logic:
-        # Avoid fights when low HP or multiple close enemies
-        should_flee = (hp_ratio < 0.3) or (len([e for e in enemy_mechs if e["_dist"] < 30.0]) >= 2)
+        # Check nearby valuable secondary weapons to actively scavenge
+        target_weapon_pickup = None
+        if not has_secondary and all_pickups and not enemy_mechs:
+            pref = {"laser": 4, "lightning": 3, "mortar": 2}
+            good_weapons = [p for p in all_pickups if pref.get(p.get("kind", ""), 0) > 0 and dist2d(p["pos"], pos) < 55.0]
+            if good_weapons:
+                target_weapon_pickup = max(good_weapons, key=lambda p: pref.get(p.get("kind", ""), 0))
 
-        if should_flee and enemy_mechs:
-            # Flee from closest enemy while staying in zone
-            threat = enemy_mechs[0]
-            away_x, away_y = norm2d(px - threat["pos"][0], py - threat["pos"][1])
-            move_x = away_x * 0.6 + to_zone_x * 0.4
-            move_y = away_y * 0.6 + to_zone_y * 0.4
-            aim_yaw, aim_pitch = self._compute_lead_aim(threat["pos"], threat.get("vel", [0, 0, 0]), pos)
-            if threat["_dist"] < 40.0:
-                should_fire = True
-                combat_target = threat
+        # Check nearby loose cubes to vacuum up (+4% HP & +4% DMG)
+        near_cube = None
+        if cubes_on_ground and not enemy_mechs:
+            close_cubes = [c for c in cubes_on_ground if dist2d(c["pos"], pos) < 25.0]
+            if close_cubes:
+                near_cube = min(close_cubes, key=lambda c: dist2d(c["pos"], pos))
 
-        elif enemy_mechs:
-            target = enemy_mechs[0]
-            combat_target = target
-            tdist = target["_dist"]
-            tpos = target["pos"]
-            tvel = target.get("vel", [0, 0, 0])
+        # ── COMBAT BRANCH: We see enemies ──────────────────────────
+        if enemy_mechs:
+            in_direct_combat = True
+            primary_enemy = enemy_mechs[0]
+            combat_target = primary_enemy
+            tpos = primary_enemy["pos"]
+            tvel = primary_enemy.get("vel", [0, 0, 0])
+            tdist = primary_enemy["_dist"]
 
+            # ALWAYS lock aim on primary threat: Keeps front armor facing enemy (NO REAR 1.5x CRIT)
             aim_yaw, aim_pitch = self._compute_lead_aim(tpos, tvel, pos)
             should_fire = True
 
-            # Dynamic circle-strafing:
-            ex, ey = norm2d(px - tpos[0], py - tpos[1])
-            tx, ty = rotate90(ex, ey, self.strafe_dir)
+            # Away vector from enemy
+            away_x, away_y = norm2d(px - tpos[0], py - tpos[1])
+            # Lateral circle-strafe tangent vector
+            tx, ty = rotate90(away_x, away_y, self.strafe_dir)
 
-            if tdist < 18.0:
-                # Push back strongly while strafing
-                move_x = ex * 0.75 + tx * 0.25
-                move_y = ey * 0.75 + ty * 0.25
-            elif tdist < 45.0:
-                # Optimal combat range: 70% strafe, 30% zone inward
-                move_x = tx * 0.70 + to_zone_x * 0.30
-                move_y = ty * 0.70 + to_zone_y * 0.30
+            # Check if critically swarmed (3+ mechs or HP < 20%): kite towards safe zone
+            if len([e for e in enemy_mechs if e["_dist"] < 30.0]) >= 2 and hp_ratio < 0.25:
+                # Backpedal toward zone while maintaining front-facing aim at enemy
+                move_x = away_x * 0.5 + to_zone_x * 0.5
+                move_y = away_y * 0.5 + to_zone_y * 0.5
+            elif tdist < 18.0:
+                # Enemy is rushing into close range: aggressively backpedal while strafing
+                move_x = away_x * 0.75 + tx * 0.25
+                move_y = away_y * 0.75 + ty * 0.25
+            elif tdist <= 35.0:
+                # Sweet-spot engagement range: dominantly circle-strafe with subtle zone drift
+                move_x = tx * 0.75 + to_zone_x * 0.20 + away_x * 0.05
+                move_y = ty * 0.75 + to_zone_y * 0.20 + away_y * 0.05
             else:
-                # Approach smoothly while strafing
-                move_x = -ex * 0.45 + tx * 0.35 + to_zone_x * 0.20
-                move_y = -ey * 0.45 + ty * 0.35 + to_zone_y * 0.20
+                # Target is at medium/long range: close in smoothly while strafing
+                move_x = -away_x * 0.45 + tx * 0.35 + to_zone_x * 0.20
+                move_y = -away_y * 0.45 + ty * 0.35 + to_zone_y * 0.20
 
+        # ── NON-COMBAT VALUE HARVESTING BRANCHES ───────────────────
         elif best_drop:
-            # Secure supply drop (3 cubes + full HP)
+            # Route to supply drop and stand in radius to capture full heal
             dp = best_drop["pos"]
             move_x, move_y = norm2d(dp[0] - px, dp[1] - py)
             aim_yaw = math.atan2(move_y, move_x)
 
-        elif npcs and (match_time < 180.0 or cubes < 6) and npcs[0]["_dist"] < 50.0:
-            # Farm NPC early for cubes (2 cubes each = +8% HP & dmg)
+        elif target_weapon_pickup:
+            # Route directly to secondary weapon
+            wp = target_weapon_pickup["pos"]
+            move_x, move_y = norm2d(wp[0] - px, wp[1] - py)
+            aim_yaw = math.atan2(move_y, move_x)
+
+        elif near_cube:
+            # Step over loose power cube
+            cp = near_cube["pos"]
+            move_x, move_y = norm2d(cp[0] - px, cp[1] - py)
+            aim_yaw = math.atan2(move_y, move_x)
+
+        elif npcs and (match_time < 160.0 or cubes < 6) and npcs[0]["_dist"] < 45.0:
+            # Farm NPC for 2 cubes (+8% HP & DMG)
             npc = npcs[0]
-            ndist = npc["_dist"]
+            combat_target = npc
             aim_yaw, aim_pitch = self._compute_lead_aim(npc["pos"], npc.get("vel", [0, 0, 0]), pos)
             should_fire = True
-            combat_target = npc
 
             nx, ny = norm2d(px - npc["pos"][0], py - npc["pos"][1])
             ntx, nty = rotate90(nx, ny, self.strafe_dir)
-            if ndist < 15.0:
-                move_x = nx * 0.6 + ntx * 0.4
-                move_y = ny * 0.6 + nty * 0.4
+            if npc["_dist"] < 15.0:
+                move_x, move_y = nx * 0.6 + ntx * 0.4, ny * 0.6 + nty * 0.4
             else:
-                move_x = -nx * 0.5 + ntx * 0.5
-                move_y = -ny * 0.5 + nty * 0.5
+                move_x, move_y = -nx * 0.5 + ntx * 0.5, -ny * 0.5 + nty * 0.5
 
-        elif crates and not enemy_mechs and cubes < 4:
-            # Early crate smashing for loot & cubes
-            near_crates = [c for c in crates if dist2d(c["pos"], pos) < 35.0]
-            if near_crates:
-                c = near_crates[0]
+        elif crates and cubes < 4:
+            # Break nearby crate
+            close_crates = [c for c in crates if dist2d(c["pos"], pos) < 30.0]
+            if close_crates:
+                c = close_crates[0]
                 cp = c["pos"]
                 aim_yaw = math.atan2(cp[1] - py, cp[0] - px)
                 aim_pitch = math.atan2(cp[2] + 2.0 - (pz + 7.0), max(1.0, dist2d(cp, pos)))
@@ -260,61 +279,83 @@ class ApexHunter:
                 move_x, move_y = norm2d(cp[0] - px, cp[1] - py)
 
         else:
-            # Perimeter survival patrolling: stay around 65-75% of zone radius
-            # Avoid center meat-grinder where house bots concentrate
-            if dist_to_next < zr * 0.35:
+            # Tactical perimeter positioning: 65% radius from center
+            # Avoids central arena bot convergence while staying comfortably inside the safe zone
+            if dist_to_next < (zr * 0.35):
+                # Too close to center: push outward towards edge
                 out_x, out_y = norm2d(px - zc[0], py - zc[1])
                 tx, ty = rotate90(out_x, out_y, self.strafe_dir)
-                move_x = out_x * 0.6 + tx * 0.4
-                move_y = out_y * 0.6 + ty * 0.4
-            elif dist_to_next > zr * 0.85:
+                move_x, move_y = out_x * 0.6 + tx * 0.4, out_y * 0.6 + ty * 0.4
+            elif dist_to_next > (zr * 0.85):
+                # Nearing zone boundary: steer inward
                 move_x, move_y = to_zone_x, to_zone_y
             else:
+                # In sweet spot ring: orbit around perimeter
                 tx, ty = rotate90(to_zone_x, to_zone_y, self.strafe_dir)
-                move_x = tx * 0.75 + to_zone_x * 0.25
-                move_y = ty * 0.75 + to_zone_y * 0.25
+                move_x, move_y = tx * 0.80 + to_zone_x * 0.20, ty * 0.80 + to_zone_y * 0.20
 
-            # Sound awareness when no visible enemies: look towards nearby sounds
+            # Acoustic threat awareness: face towards nearby gunfire
             if sounds:
                 for s in sounds:
                     if s.get("dist") in ("near", "mid") and s.get("kind") in ("gun", "mortar", "laser", "lightning"):
                         aim_yaw = s.get("bearing", aim_yaw)
                         break
 
-        # ─── 7. Blend Dodging Vectors ──────────────────────────────
+        # ─── 7. Integrate Dodge Vectors ────────────────────────────
         if dodge_urgency > 0.05:
             dn_x, dn_y = norm2d(dodge_x, dodge_y)
             blend = min(0.85, dodge_urgency)
             move_x = move_x * (1.0 - blend) + dn_x * blend
             move_y = move_y * (1.0 - blend) + dn_y * blend
 
-        # ─── 8. Anti-Stuck & Jump Evasion ───────────────────────────
+        # ─── 8. Zone Edge Escape Override ──────────────────────────
+        if outside_curr:
+            move_x = to_zone_x * 0.85 + move_x * 0.15
+            move_y = to_zone_y * 0.85 + move_y * 0.15
+
+        # ─── 9. Anti-Stuck & Curb Clearance ────────────────────────
         if self.last_pos is not None:
             moved = dist2d(pos, self.last_pos)
-            if moved < 0.12:
+            if moved < 0.14:
                 self.stuck_ticks += 1
             else:
                 self.stuck_ticks = 0
         self.last_pos = list(pos)
 
         if self.stuck_ticks > 1:
+            # Deflect movement 90° away from obstruction
             move_x, move_y = rotate90(move_x, move_y, self.strafe_dir)
             if self.stuck_ticks > 5:
                 self.strafe_dir *= -1
                 move_x, move_y = -move_x, -move_y
 
-        # Normalize final movement
+        # Normalize final movement direction
         move_x, move_y = norm2d(move_x, move_y)
 
-        # Jump: every 25 ticks to clear terrain curbs (1.2m) + when stuck
+        # Jump: every 25 ticks to clear 1.2m curbs & ledges + when stuck
         should_jump = ((current_tick % 25 == 0) or (self.stuck_ticks > 1)) and grounded
 
-        # Boost: out of zone, dodging, or fleeing
-        should_boost = (not in_zone) or (outside_curr) or (dodge_urgency > 0.4 and energy > 25.0) or (should_flee and energy > 30.0) or (energy > 75.0 and dist_to_next > zr * 0.6)
+        # Boost control:
+        # - Always boost if caught outside storm
+        # - Boost in short bursts during high-threat dodges
+        # - Boost when backpedaling from close rushers
+        # - Boost if energy is high and traversing to drop
+        should_boost = False
+        if not in_zone or outside_curr:
+            should_boost = True
+        elif dodge_urgency > 0.45 and energy > 20.0:
+            should_boost = True
+        elif in_direct_combat and combat_target and combat_target.get("_dist", 50.0) < 14.0 and energy > 25.0:
+            should_boost = True
+        elif best_drop and energy > 65.0 and dist2d(best_drop["pos"], pos) > 20.0:
+            should_boost = True
+        elif energy > 80.0 and dist_to_next > (zr * 0.65):
+            should_boost = True
 
-        # ─── 9. Smart Weapon Fire Control ──────────────────────────
+        # ─── 10. Intelligent Weapons Trigger ───────────────────────
         fire_slot0 = False
         fire_slot1 = False
+
         if should_fire:
             # Slot 0: Arm Gun
             w0 = weapons[0] if len(weapons) > 0 else None
@@ -327,20 +368,24 @@ class ApexHunter:
                 elif ammo <= 0 and reloading <= 0.0:
                     action["reload"] = True
 
-            # Slot 1: Secondary Weapon
+            # Slot 1: Secondary Weapon (Heavy DPS)
             w1 = weapons[1] if len(weapons) > 1 else None
             if w1 is not None:
                 w1_kind = w1.get("kind", "")
                 cd1 = w1.get("cooldown", 0.0)
                 tdist = combat_target.get("_dist", 50.0) if combat_target else 50.0
+
                 if w1_kind == "laser":
+                    # Laser: Hold trigger to charge and release devastating beam
                     fire_slot1 = True
                 elif w1_kind == "lightning" and tdist < 45.0:
-                    fire_slot1 = cd1 <= 0.0
-                elif w1_kind == "mortar" and 25.0 < tdist < 90.0:
-                    fire_slot1 = cd1 <= 0.0
+                    # Lightning: Arc energy weapon at close/mid range
+                    fire_slot1 = (cd1 <= 0.0)
+                elif w1_kind == "mortar" and 25.0 < tdist < 85.0:
+                    # Mortar: Long-range concussive artillery
+                    fire_slot1 = (cd1 <= 0.0)
                 elif w1_kind == "gun":
-                    fire_slot1 = cd1 <= 0.0
+                    fire_slot1 = (cd1 <= 0.0)
 
         action.update(
             move=[move_x, move_y],
@@ -366,7 +411,7 @@ class ApexHunter:
 
         final_x = tpx + tvx * lead_t
         final_y = tpy + tvy * lead_t
-        final_z = tpz + tvz * lead_t + 4.5  # Mech torso center-of-mass
+        final_z = tpz + tvz * lead_t + 4.5  # Torso center-of-mass height
 
         yaw = math.atan2(final_y - mpy, final_x - mpx)
         hdist = max(1.0, dist2d((final_x, final_y), (mpx, mpy)))
