@@ -1,4 +1,5 @@
 FROM python:3.13-slim
 WORKDIR /bot
 COPY . .
-ENTRYPOINT ["python3", "-u", "/bot/apex_hunter_v7_1.py"]
+ENTRYPOINT ["python3", "-u", "/bot/apex_hunter_v7_2.py"]
+
