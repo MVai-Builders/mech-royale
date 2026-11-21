@@ -402,18 +402,20 @@ class PhantomV2:
         """2-iteration predictive lead aiming at torso center of mass."""
         tpos = target["pos"]
         tvel = target.get("vel", [0, 0, 0])
+        tpx, tpy, tpz = tpos[0], tpos[1], tpos[2]
+        tvx, tvy, tvz = tvel[0], tvel[1], tvel[2]
         px, py, pz = my_pos
 
         lead_t = 0.0
         for _ in range(2):
-            lx = tpos[0] + tvel[0] * lead_t
+            lx = tpx + tvx * lead_t
             ly = tpy + tvy * lead_t
             d = dist2d([lx, ly], [px, py])
             lead_t = min(0.55, d / max(1.0, self.gun_speed))
 
-        final_x = tpos[0] + tvel[0] * lead_t
+        final_x = tpx + tvx * lead_t
         final_y = tpy + tvy * lead_t
-        final_z = tpos[2] + tvel[2] * lead_t + 4.5  # torso center-of-mass
+        final_z = tpz + tvz * lead_t + 4.5  # torso center-of-mass
 
         yaw = math.atan2(final_y - py, final_x - px)
         hdist = max(1.0, dist2d([final_x, final_y], [px, py]))
