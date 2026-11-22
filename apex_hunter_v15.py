@@ -305,25 +305,27 @@ class ApexHunter:
 
             tx, ty = rotate90(away_x, away_y, self.strafe_dir)
 
-            # Swarm kiting
+            # Intelligent Kiting & Survival Disengage:
+            # If HP is low (< 42%), actively backpedal + boost away to trigger 45 HP/s passive regen!
             n_close_30 = len([e for e in enemy_mechs if e["_dist"] < 30.0])
-            if n_close_30 >= 2 and hp_ratio < 0.50:
-                move_x = away_x * 0.60 + to_zone_x * 0.40
-                move_y = away_y * 0.60 + to_zone_y * 0.40
-            elif tdist < 20.0:
-                # Close-range backpedal while keeping front armor toward enemy
-                move_x = away_x * 0.75 + tx * 0.25
-                move_y = away_y * 0.75 + ty * 0.25
-            elif tdist <= 35.0:
-                # Sweet-spot 20-35m circle-strafe
-                tcoef = max(0.30, 0.95 - anchor_w)
-                move_x = tx * tcoef + anchor_x * anchor_w + away_x * 0.05
-                move_y = ty * tcoef + anchor_y * anchor_w + away_y * 0.05
+            if hp_ratio < 0.42 or (n_close_30 >= 2 and hp_ratio < 0.55):
+                # Disengage & kite away toward safe zone center
+                move_x = away_x * 0.70 + to_zone_x * 0.30
+                move_y = away_y * 0.70 + to_zone_y * 0.30
+            elif tdist < 24.0:
+                # Keep safe standoff distance: enemy rushing inside 24m -> backpedal aggressively
+                move_x = away_x * 0.80 + tx * 0.20
+                move_y = away_y * 0.80 + ty * 0.20
+            elif tdist <= 40.0:
+                # Golden 25-40m circle-strafe standoff zone (house bots miss due to spread)
+                tcoef = max(0.35, 0.95 - anchor_w)
+                move_x = tx * tcoef + anchor_x * anchor_w + away_x * 0.08
+                move_y = ty * tcoef + anchor_y * anchor_w + away_y * 0.08
             else:
-                # Medium/long range approach while strafing
-                tcoef = max(0.15, 0.55 - anchor_w)
-                move_x = -away_x * 0.45 + tx * tcoef + anchor_x * anchor_w
-                move_y = -away_y * 0.45 + ty * tcoef + anchor_y * anchor_w
+                # Target is at long range (> 40m): smoothly close in while strafing
+                tcoef = max(0.20, 0.55 - anchor_w)
+                move_x = -away_x * 0.40 + tx * tcoef + anchor_x * anchor_w
+                move_y = -away_y * 0.40 + ty * tcoef + anchor_y * anchor_w
 
             if cap_active:
                 dpx, dpy = best_drop["pos"][0], best_drop["pos"][1]
@@ -431,7 +433,9 @@ class ApexHunter:
         should_boost = False
         if not in_zone or outside_curr:
             should_boost = True
-        elif in_direct_combat and hp_ratio < 0.50 and len([e for e in enemy_mechs if e["_dist"] < 30.0]) >= 2 and energy > 20.0:
+        elif in_direct_combat and hp_ratio < 0.42 and energy > 20.0:
+            should_boost = True  # Disengage boost to recover 45 HP/s regen!
+        elif in_direct_combat and hp_ratio < 0.55 and len([e for e in enemy_mechs if e["_dist"] < 30.0]) >= 2 and energy > 20.0:
             should_boost = True
         elif dodge_urgency > 0.45 and energy > 20.0:
             should_boost = True
