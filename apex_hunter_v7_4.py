@@ -181,9 +181,62 @@ def plan_cover(grid, pos, enemies_xy, zone_center, zone_radius, max_r=40.0, min_
 
 
 def load_grid(hello):
-    """TODO (Gemini): parse hello["map"]["dir"] / hello["map"]["files"] into an OccupancyGrid
-    (e.g. OccupancyGrid.from_rects(footprints)). Return None until implemented and verified."""
-    return None
+    """Parse hello['map']['dir'] / hello['map']['files'] into an OccupancyGrid."""
+    m_info = hello.get("map") or {}
+    mdir = m_info.get("dir", "")
+    files = m_info.get("files", [])
+    if not mdir or not files:
+        return None
+
+    rects = []
+    for fname in files:
+        fpath = os.path.join(mdir, fname)
+        if not os.path.exists(fpath):
+            continue
+        try:
+            if fname.endswith(".json"):
+                with open(fpath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                items = data if isinstance(data, list) else data.get("buildings", data.get("colliders", []))
+                for item in items:
+                    if isinstance(item, (list, tuple)) and len(item) == 4:
+                        rects.append((float(item[0]), float(item[1]), float(item[2]), float(item[3])))
+                    elif isinstance(item, dict):
+                        if item.get("blocks_los") is False:
+                            continue
+                        h = item.get("height", 10.0)
+                        if isinstance(h, (int, float)) and h < 2.0:
+                            continue  # low objects/curbs do not block line of sight
+                        bmin = item.get("min") or item.get("box_min")
+                        bmax = item.get("max") or item.get("box_max")
+                        if bmin and bmax:
+                            rects.append((float(bmin[0]), float(bmin[1]), float(bmax[0]), float(bmax[1])))
+                        elif "rect" in item:
+                            r = item["rect"]
+                            rects.append((float(r[0]), float(r[1]), float(r[2]), float(r[3])))
+                        elif "x" in item and "y" in item and "w" in item and "h" in item:
+                            x, y, w, h = item["x"], item["y"], item["w"], item["h"]
+                            rects.append((float(x), float(y), float(x + w), float(y + h)))
+            elif fname.endswith(".obj"):
+                verts = []
+                with open(fpath, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if line.startswith("v "):
+                            parts = line.strip().split()
+                            verts.append((float(parts[1]), float(parts[2])))
+                        elif line.startswith("f ") and len(verts) >= 3:
+                            f_indices = [int(p.split("/")[0]) - 1 for p in line.strip().split()[1:]]
+                            xs = [verts[idx][0] for idx in f_indices if 0 <= idx < len(verts)]
+                            ys = [verts[idx][1] for idx in f_indices if 0 <= idx < len(verts)]
+                            if xs and ys:
+                                rects.append((min(xs), min(ys), max(xs), max(ys)))
+        except Exception:
+            pass
+
+    if not rects:
+        return None
+    return OccupancyGrid.from_rects(rects, cell=2.0, pad=20.0)
+
 
 class ApexHunter:
     name = "MVai-Apex"
